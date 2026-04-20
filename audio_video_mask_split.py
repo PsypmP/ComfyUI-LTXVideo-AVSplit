@@ -956,41 +956,15 @@ class LTXVStitchAVLatentsWithTransitionMask:
 
         if post_blend:
             # Post-blend mode: NO noise_mask → sampler denoises everything equally.
-            # Store originals + blend envelope for LTXVPostBlendTransition.
+            # Store originals + blend masks for LTXVPostBlendTransition.
+            # Important: reuse the same masks as standard mode so mask_* and
+            # *_mask_init_value semantics stay identical.
             if "noise_mask" in output_latent:
                 del output_latent["noise_mask"]
 
-            # Build video blend envelope: 0 = keep original, 1 = keep generated
-            video_blend = _build_temporal_window_with_external_slope(
-                video_frame_count,
-                video_start_idx if mask_video else transition_start_idx,
-                video_end_idx_exclusive
-                if mask_video
-                else (transition_start_idx + transition_len),
-                video_slope_len if mask_video else 0,
-                video_concat.device,
-                video_concat.dtype,
-            ).view(1, 1, video_frame_count, 1, 1)
-            video_blend = video_blend.expand(1, 1, video_frame_count,
-                                             video_concat.shape[3],
-                                             video_concat.shape[4]).clone()
-
-            # Build audio blend envelope
-            if mask_audio:
-                audio_blend = _build_temporal_envelope(
-                    audio_frame_count,
-                    audio_start_idx,
-                    audio_end_idx_exclusive,
-                    audio_slope_len,
-                    audio_concat.device,
-                    audio_concat.dtype,
-                ).view(1, 1, audio_frame_count, 1)
-            else:
-                audio_blend = torch.ones(1, 1, audio_frame_count, 1,
-                                         device=audio_concat.device,
-                                         dtype=audio_concat.dtype)
-            audio_blend = audio_blend.expand(1, 1, audio_frame_count,
-                                             audio_concat.shape[3]).clone()
+            # Blend convention: 0 = keep original, 1 = keep generated.
+            video_blend = torch.clamp(video_mask, 0.0, 1.0).clone()
+            audio_blend = torch.clamp(audio_mask, 0.0, 1.0).clone()
 
             # Store for PostBlend node
             output_latent["_postblend_video_original"] = video_concat.clone()
@@ -1096,6 +1070,29 @@ class LTXVPostBlendTransition:
         audio_blend = stitch_av_latent["_postblend_audio_blend"].to(
             device=denoised_audio.device, dtype=denoised_audio.dtype
         )
+        video_blend = torch.clamp(video_blend, 0.0, 1.0)
+        audio_blend = torch.clamp(audio_blend, 0.0, 1.0)
+
+        if orig_video.shape != denoised_video.shape:
+            raise ValueError(
+                "Post-blend video shape mismatch: "
+                f"orig={orig_video.shape}, denoised={denoised_video.shape}."
+            )
+        if video_blend.shape != denoised_video.shape:
+            raise ValueError(
+                "Post-blend video blend shape mismatch: "
+                f"blend={video_blend.shape}, denoised={denoised_video.shape}."
+            )
+        if orig_audio.shape != denoised_audio.shape:
+            raise ValueError(
+                "Post-blend audio shape mismatch: "
+                f"orig={orig_audio.shape}, denoised={denoised_audio.shape}."
+            )
+        if audio_blend.shape != denoised_audio.shape:
+            raise ValueError(
+                "Post-blend audio blend shape mismatch: "
+                f"blend={audio_blend.shape}, denoised={denoised_audio.shape}."
+            )
 
         # --- blend: output = orig * (1 - blend) + denoised * blend -------------
         blended_video = orig_video * (1.0 - video_blend) + denoised_video * video_blend
@@ -1117,5 +1114,8 @@ class LTXVPostBlendTransition:
         )
         if "noise_mask" in output_latent:
             del output_latent["noise_mask"]
+        for k in required_keys:
+            if k in output_latent:
+                del output_latent[k]
 
         return (output_latent,)
