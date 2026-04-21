@@ -1,4 +1,4 @@
-import math
+🅛🅣🅧 LTXV Stitch AV Latents With Traimport math
 import numpy as np
 import torch
 from comfy.ldm.lightricks.vae.audio_vae import LATENT_DOWNSAMPLE_FACTOR
@@ -299,47 +299,7 @@ def _build_temporal_window_with_external_slope(
     )
 
 
-def _build_temporal_window_with_internal_slope(
-    length: int,
-    start_idx: int,
-    end_idx_exclusive: int,
-    slope_len: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Build a window that ramps only inside [start_idx, end_idx_exclusive).
-
-    Unlike _build_temporal_envelope, this never bleeds into the surrounding
-    interval. It is used for strict bridge-only audio masking so clip 1 / clip 2
-    audio remains untouched outside the bridge.
-    """
-    envelope = torch.zeros(length, device=device, dtype=dtype)
-    if length <= 0:
-        return envelope
-
-    start_idx, end_idx_exclusive = _clamp_interval(start_idx, end_idx_exclusive, length)
-    if end_idx_exclusive <= start_idx:
-        return envelope
-
-    window_len = end_idx_exclusive - start_idx
-    envelope[start_idx:end_idx_exclusive] = 1.0
-
-    internal_slope = min(max(0, int(slope_len)), window_len // 2)
-    if internal_slope > 0:
-        ramp = (
-            torch.arange(1, internal_slope + 1, device=device, dtype=dtype)
-            / float(internal_slope)
-        )
-        envelope[start_idx : start_idx + internal_slope] = ramp
-        envelope[end_idx_exclusive - internal_slope : end_idx_exclusive] = torch.minimum(
-            envelope[end_idx_exclusive - internal_slope : end_idx_exclusive],
-            torch.flip(ramp, dims=[0]),
-        )
-
-    return torch.clamp(envelope, 0.0, 1.0)
-
-
-@comfy_node(description="LTXV Set Audio Video Mask By Time Split")
+@comfy_node(description="LTXV Mask By Time Split")
 class LTXVSetAudioVideoMaskByTimeSplit:
     @classmethod
     def INPUT_TYPES(cls):
@@ -699,15 +659,15 @@ class LTXVStitchAVLatentsWithTransitionMask:
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.1, "round": 0.01},
                 ),
-                "audio_mask_bridge_only": (
+                "post_blend": (
                     "BOOLEAN",
                     {
                         "default": False,
                         "tooltip": (
-                            "If enabled, ignore audio_start_time/audio_end_time and mask exactly "
-                            "the inserted audio bridge so only bridge audio is denoised. "
-                            "audio_slope_len is applied inside the bridge and never bleeds into "
-                            "clip 1 / clip 2 audio."
+                            "Post-blend mode: no noise_mask during sampling (uniform denoise). "
+                            "Use LTXVPostBlendTransition node after sampling to blend originals back. "
+                            "Eliminates noise-level discontinuity at mask boundaries. "
+                            "Works in both stitch modes."
                         ),
                     },
                 ),
@@ -780,7 +740,7 @@ class LTXVStitchAVLatentsWithTransitionMask:
         audio_slope_len,
         mask_audio,
         audio_mask_init_value,
-        audio_mask_bridge_only,
+        post_blend=False,
         bridge_init_mode="lerp",
         vae=None,
         audio_vae=None,
@@ -920,9 +880,6 @@ class LTXVStitchAVLatentsWithTransitionMask:
 
         video_frame_count = video_concat.shape[2]
         audio_frame_count = audio_concat.shape[2]
-        audio_mask_mode = "disabled"
-        audio_start_idx = 0
-        audio_end_idx_exclusive = 0
 
         if mask_video:
             video_start_idx, video_end_idx_exclusive = _clamp_interval(
@@ -946,38 +903,21 @@ class LTXVStitchAVLatentsWithTransitionMask:
             video_mask = target_video_mask.expand_as(video_mask).clone()
 
         if mask_audio:
-            if audio_mask_bridge_only:
-                audio_mask_mode = "bridge_only"
-                audio_start_idx = audio_samples_1.shape[2]
-                audio_end_idx_exclusive = min(
-                    audio_start_idx + audio_bridge_latent_frames,
-                    audio_frame_count,
-                )
-                audio_envelope = _build_temporal_window_with_internal_slope(
-                    audio_frame_count,
-                    audio_start_idx,
-                    audio_end_idx_exclusive,
-                    audio_slope_len,
-                    audio_mask.device,
-                    audio_mask.dtype,
-                ).view(1, 1, audio_frame_count, 1)
-            else:
-                audio_mask_mode = "absolute_time"
-                audio_start_idx, audio_end_idx_exclusive = _time_to_audio_latent_indices(
-                    audio_start_time,
-                    audio_end_time,
-                    audio_latents_per_second,
-                    audio_frame_count,
-                )
+            audio_start_idx, audio_end_idx_exclusive = _time_to_audio_latent_indices(
+                audio_start_time,
+                audio_end_time,
+                audio_latents_per_second,
+                audio_frame_count,
+            )
 
-                audio_envelope = _build_temporal_envelope(
-                    audio_frame_count,
-                    audio_start_idx,
-                    audio_end_idx_exclusive,
-                    audio_slope_len,
-                    audio_mask.device,
-                    audio_mask.dtype,
-                ).view(1, 1, audio_frame_count, 1)
+            audio_envelope = _build_temporal_envelope(
+                audio_frame_count,
+                audio_start_idx,
+                audio_end_idx_exclusive,
+                audio_slope_len,
+                audio_mask.device,
+                audio_mask.dtype,
+            ).view(1, 1, audio_frame_count, 1)
 
             target_audio_mask = float(audio_mask_init_value) + audio_envelope * (
                 1.0 - float(audio_mask_init_value)
@@ -1007,25 +947,41 @@ class LTXVStitchAVLatentsWithTransitionMask:
               f"min={min(_am):.3f}, max={max(_am):.3f}, "
               f"first_nonzero={next((i for i,v in enumerate(_am) if v > 0.01), 'none')}, "
               f"last_nonzero={next((i for i in range(len(_am)-1,-1,-1) if _am[i] > 0.01), 'none')}")
-        if mask_audio:
-            print(
-                f"[StitchDebug] audio mask window ({audio_mask_mode}): "
-                f"start_idx={audio_start_idx}, end_idx={audio_end_idx_exclusive}, "
-                f"start_sec~{audio_start_idx / audio_latents_per_second:.3f}, "
-                f"end_sec~{audio_end_idx_exclusive / audio_latents_per_second:.3f}, "
-                f"slope_len={audio_slope_len}, bridge_audio_len={audio_bridge_latent_frames}"
-            )
         # === END DEBUG ===
 
         output_latent = av_latent_1.copy()
         output_latent["samples"] = NestedTensor(
             ltxav.recombine_audio_and_video_latents(video_concat, audio_concat)
         )
-        output_latent["noise_mask"] = NestedTensor(
-            ltxav.recombine_audio_and_video_latents(
-                torch.clamp(video_mask, 0.0, 1.0),
-                torch.clamp(audio_mask, 0.0, 1.0),
+
+        if post_blend:
+            # Post-blend mode: NO noise_mask → sampler denoises everything equally.
+            # Store originals + blend masks for LTXVPostBlendTransition.
+            # Important: reuse the same masks as standard mode so mask_* and
+            # *_mask_init_value semantics stay identical.
+            if "noise_mask" in output_latent:
+                del output_latent["noise_mask"]
+
+            # Blend convention: 0 = keep original, 1 = keep generated.
+            video_blend = torch.clamp(video_mask, 0.0, 1.0).clone()
+            audio_blend = torch.clamp(audio_mask, 0.0, 1.0).clone()
+
+            # Store for PostBlend node
+            output_latent["_postblend_video_original"] = video_concat.clone()
+            output_latent["_postblend_audio_original"] = audio_concat.clone()
+            output_latent["_postblend_video_blend"] = video_blend
+            output_latent["_postblend_audio_blend"] = audio_blend
+
+            print(f"[StitchDebug] POST_BLEND mode: no noise_mask set. "
+                  f"Blend envelope stored. Video blend range: "
+                  f"{video_blend[0,0,:,0,0].tolist()}")
+        else:
+            # Standard inpaint mode: per-step masking
+            output_latent["noise_mask"] = NestedTensor(
+                ltxav.recombine_audio_and_video_latents(
+                    torch.clamp(video_mask, 0.0, 1.0),
+                    torch.clamp(audio_mask, 0.0, 1.0),
+                )
             )
-        )
 
         return (output_latent,)
