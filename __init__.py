@@ -1,22 +1,25 @@
 from .audio_video_mask_split import (
-    LTXVPostBlendTransition,
     LTXVSetAudioVideoMaskByTimeSplit,
     LTXVStitchAVLatentsWithTransitionMask,
 )
-from .nodes_registry import NODES_DISPLAY_NAME_PREFIX, camel_case_to_spaces
+from .nodes_registry import NODES_DISPLAY_NAME_PREFIX
 from .two_stage_resolution import TwoStageResolution
 
 
 NODE_CLASS_MAPPINGS = {
     "LTXVSetAudioVideoMaskByTimeSplit": LTXVSetAudioVideoMaskByTimeSplit,
     "LTXVStitchAVLatentsWithTransitionMask": LTXVStitchAVLatentsWithTransitionMask,
-    "LTXVPostBlendTransition": LTXVPostBlendTransition,
     "TwoStageResolution": TwoStageResolution,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    name: f"{NODES_DISPLAY_NAME_PREFIX} {camel_case_to_spaces(name)}"
-    for name in NODE_CLASS_MAPPINGS.keys()
+    "LTXVSetAudioVideoMaskByTimeSplit": (
+        f"{NODES_DISPLAY_NAME_PREFIX} Set Audio Video Mask By Time Split"
+    ),
+    "LTXVStitchAVLatentsWithTransitionMask": (
+        f"{NODES_DISPLAY_NAME_PREFIX} Stitch AV Latents"
+    ),
+    "TwoStageResolution": f"{NODES_DISPLAY_NAME_PREFIX} Two Stage Resolution",
 }
 
 __all__ = [

@@ -2,10 +2,9 @@
 
 Пак нод для ComfyUI с разделением/сшивкой AV-латентов LTX и расчетом разрешения под staged upscale.
 
-В паке 4 ноды:
+В паке 3 ноды:
 - `LTXVSetAudioVideoMaskByTimeSplit`
 - `LTXVStitchAVLatentsWithTransitionMask`
-- `LTXVPostBlendTransition`
 - `TwoStageResolution`
 
 Display-имена в ComfyUI формируются с префиксом `🅛🅣🅧`.
@@ -29,7 +28,6 @@ Display-имена в ComfyUI формируются с префиксом `🅛
 | --- | --- | --- | --- | --- |
 | `LTXVSetAudioVideoMaskByTimeSplit` | `lightricks/LTXV` | `LATENT`, `MODEL`, `VAE`, `VAE` + тайминги/маски | `LATENT` | Создает/обновляет `noise_mask` с раздельными окнами по времени для видео и аудио |
 | `LTXVStitchAVLatentsWithTransitionMask` | `lightricks/LTXV` | 2x `LATENT`, `MODEL` + режим сшивки/маски | `LATENT` | Сшивает два AV-латента, формирует transition и маски |
-| `LTXVPostBlendTransition` | `lightricks/LTXV` | `LATENT` (denoised), `LATENT` (stitch), `MODEL` | `LATENT` | Пост-бленд исходных и сгенерированных латентов после равномерного денойза |
 | `TwoStageResolution` | `video/resolution` | `width`, `height`, `spatial_upscaler` | `width`, `height`, `info` | Считает базовое разрешение под выбранный upscale-режим |
 
 ## Ноды подробно
@@ -82,9 +80,7 @@ Display-имена в ComfyUI формируются с префиксом `🅛
 - `video_pre_frames`, `video_post_frames`, `video_slope_len`: управление окном и краями видео-маски вокруг transition.
 - `mask_video`, `video_mask_init_value`: включение и база видео-маски.
 - `audio_start_time`, `audio_end_time`, `audio_slope_len`, `mask_audio`, `audio_mask_init_value`: параметры аудио-маски.
-- `post_blend` (`BOOLEAN`):
-  - `False`: обычный режим, пишет `noise_mask` в выходной latent.
-  - `True`: не ставит `noise_mask`, а сохраняет служебные поля для `LTXVPostBlendTransition`.
+- `audio_mask_bridge_only` (`BOOLEAN`): если включен, `audio_start_time`/`audio_end_time` игнорируются и аудио-маска покрывает ровно вставленный audio bridge, чтобы не трогать звук 1-го и 2-го клипа вне моста.
 - Опционально `vae`, `audio_vae`: точный temporal stride/аудио-rate; если не подключены, берутся дефолты (`8` и `~25 Hz`).
 
 Выход:
@@ -93,32 +89,8 @@ Display-имена в ComfyUI формируются с префиксом `🅛
 Ключевое поведение:
 - Аудио всегда сшивается через bridge (даже в `overlap_linear_video`).
 - Размер transition-области учитывается при построении масок.
-- В `post_blend=True` в latent сохраняются:
-  - `_postblend_video_original`
-  - `_postblend_audio_original`
-  - `_postblend_video_blend`
-  - `_postblend_audio_blend`
-
-### 3) `LTXVPostBlendTransition`
-
-Назначение: пост-бленд после sampling, когда stitch-нода работала с `post_blend=True`.
-
-Входы:
-- `denoised_av_latent` (`LATENT`): результат сэмплера.
-- `stitch_av_latent` (`LATENT`): выход `LTXVStitchAVLatentsWithTransitionMask` из той же ветки с `post_blend=True`.
-- `model` (`MODEL`): модель LTX AV.
-
-Выход:
-- `av_latent` (`LATENT`): итоговый латент после смешивания.
-
-Формула смешивания:
-- `output = original * (1 - blend) + denoised * blend`
-
-Ключевое поведение:
-- Проверяет наличие служебных `_postblend_*` полей.
-- Удаляет `noise_mask` из результата (если он был), чтобы вернуть чистый blended latent.
-
-### 4) `TwoStageResolution`
+- При `audio_mask_bridge_only=True` звук генерируется только на bridge-сегменте; границы задаются по реальной позиции bridge в audio latents, а не по секундам.
+### 3) `TwoStageResolution`
 
 Назначение: вычислить базовое разрешение, согласованное с шагами латента и выбранным upscale-режимом.
 
@@ -136,14 +108,6 @@ Display-имена в ComfyUI формируются с префиксом `🅛
 - `none`: округление до шага `32`.
 - `1.5` или `2`: подбор шага, кратного и `32`, и коэффициенту upscale.
 - `3KS (2x+2x)`: расчет цепочки `BASE -> MID -> FACT`, где `FACT` кратен `128`.
-
-## Минимальная схема использования Stitch + PostBlend
-
-1. Подайте два латента в `LTXVStitchAVLatentsWithTransitionMask`.
-2. Включите `post_blend=True`.
-3. Выход stitch-ноды отправьте в sampler.
-4. Результат sampler (`denoised_av_latent`) и исходный выход stitch-ноды (`stitch_av_latent`) подайте в `LTXVPostBlendTransition`.
-5. Используйте выход `LTXVPostBlendTransition` как финальный AV-латент.
 
 ## Зависимости
 
